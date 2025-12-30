@@ -1,0 +1,18 @@
+{
+  "name": "whoru",
+  "version": "1.0.0",
+  "description": "WhoRU - Anonymous 1v1 Chat Application",
+  "scripts": {
+    "install-all": "cd server && npm install && cd ../client && npm install",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm start",
+    "dev": "echo Run 'npm run server' in one terminal and 'npm run client' in another"
+  },
+  "keywords": ["chat", "real-time", "socket.io", "react", "mongodb"],
+  "author": "GitHub Copilot",
+  "license": "MIT",
+  "dependencies": {
+    "mongodb": "^7.0.0"
+  }
+}
+
