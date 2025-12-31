@@ -1,5 +1,8 @@
 const Message = require('../models/Message');
+const GroupMessage = require('../models/GroupMessage');
+const Group = require('../models/Group');
 const User = require('../models/User');
+const { createNotification } = require('../utils/notificationHelper');
 
 /**
  * Socket.io Chat Handler
@@ -72,8 +75,8 @@ const initializeSocketHandlers = (io) => {
         await message.save();
 
         // Populate sender info
-        await message.populate('sender', 'username');
-        await message.populate('receiver', 'username');
+        await message.populate('sender', 'username profilePicture');
+        await message.populate('receiver', 'username profilePicture');
 
         // Emit to receiver if online
         const receiverSocketId = onlineUsers.get(receiverId);
@@ -89,6 +92,16 @@ const initializeSocketHandlers = (io) => {
           message: message,
           tempId: data.tempId // For client-side optimistic updates
         });
+        
+        // Create notification for new message
+        await createNotification({
+          recipient: receiverId,
+          sender: senderId,
+          type: 'new_message',
+          message: `${message.sender.username} sent you a message`,
+          link: `/chat/${senderId}`,
+          metadata: { messageId: message._id.toString() }
+        }, io);
 
         console.log(`📨 Message from ${senderId} to ${receiverId}`);
       } catch (error) {
@@ -170,6 +183,148 @@ const initializeSocketHandlers = (io) => {
         }
       } catch (error) {
         console.error('Disconnect error:', error);
+      }
+    });
+
+    // ===== GROUP CHAT HANDLERS =====
+
+    /**
+     * Join a group room
+     */
+    socket.on('join_group', async (data) => {
+      try {
+        const { groupId } = data;
+        const userId = socket.userId;
+
+        if (!userId || !groupId) {
+          return;
+        }
+
+        // Verify user is member of group
+        const group = await Group.findById(groupId);
+        const isMember = group.members.some(m => m.user.toString() === userId);
+
+        if (isMember) {
+          socket.join(`group:${groupId}`);
+          console.log(`✅ User ${userId} joined group ${groupId}`);
+          
+          // Notify group
+          socket.to(`group:${groupId}`).emit('user_joined_group', {
+            userId,
+            groupId
+          });
+        }
+      } catch (error) {
+        console.error('Join group error:', error);
+      }
+    });
+
+    /**
+     * Leave a group room
+     */
+    socket.on('leave_group', (data) => {
+      const { groupId } = data;
+      const userId = socket.userId;
+
+      if (groupId) {
+        socket.leave(`group:${groupId}`);
+        console.log(`User ${userId} left group ${groupId}`);
+        
+        socket.to(`group:${groupId}`).emit('user_left_group', {
+          userId,
+          groupId
+        });
+      }
+    });
+
+    /**
+     * Send group message
+     */
+    socket.on('send_group_message', async (data) => {
+      try {
+        const { groupId, content, messageType = 'text', tempId } = data;
+        const senderId = socket.userId;
+
+        if (!senderId || !groupId || !content) {
+          socket.emit('error', { message: 'Invalid message data' });
+          return;
+        }
+
+        // Verify user is member
+        const group = await Group.findById(groupId).populate('members.user', 'username profilePicture');
+        if (!group) {
+          socket.emit('error', { message: 'Group not found' });
+          return;
+        }
+
+        const isMember = group.members.some(m => m.user._id.toString() === senderId);
+        if (!isMember) {
+          socket.emit('error', { message: 'Not a member of this group' });
+          return;
+        }
+
+        // Save message
+        const message = new GroupMessage({
+          group: groupId,
+          sender: senderId,
+          messageType,
+          content: content.trim()
+        });
+
+        await message.save();
+        await message.populate('sender', '_id username profilePicture');
+
+        // Update group last activity
+        group.lastActivity = new Date();
+        await group.save();
+
+        // Emit to all group members
+        io.to(`group:${groupId}`).emit('receive_group_message', {
+          message,
+          groupId,
+          tempId
+        });
+
+        // Send confirmation to sender
+        socket.emit('group_message_sent', {
+          message,
+          tempId
+        });
+
+        console.log(`📨 Group message in ${groupId} from ${senderId}`);
+      } catch (error) {
+        console.error('Send group message error:', error);
+        socket.emit('error', { message: 'Failed to send message' });
+      }
+    });
+
+    /**
+     * Group typing indicator
+     */
+    socket.on('group_typing', (data) => {
+      const { groupId } = data;
+      const userId = socket.userId;
+
+      if (groupId && userId) {
+        socket.to(`group:${groupId}`).emit('user_typing_group', { 
+          userId, 
+          groupId 
+        });
+      }
+    });
+
+    /**
+     * Stop group typing
+     */
+    socket.on('group_stop_typing', (data) => {
+      const { groupId } = data;
+      const userId = socket.userId;
+
+      if (groupId && userId) {
+        socket.to(`group:${groupId}`).emit('user_stop_typing_group', { 
+          userId, 
+          groupId 
+        });
       }
     });
   });

@@ -138,7 +138,8 @@ router.post('/verify-otp', [
       user: {
         id: user._id,
         username: user.username,
-        email: user.email
+        email: user.email,
+        profilePicture: user.profilePicture
       }
     });
   } catch (error) {
@@ -273,7 +274,8 @@ router.post('/login', [
       user: {
         id: user._id,
         username: user.username,
-        email: user.email
+        email: user.email,
+        profilePicture: user.profilePicture
       }
     });
   } catch (error) {
@@ -298,6 +300,7 @@ router.get('/me', authMiddleware, async (req, res) => {
         id: req.user._id,
         username: req.user.username,
         email: req.user.email,
+        profilePicture: req.user.profilePicture,
         friends: req.user.friends,
         createdAt: req.user.createdAt
       }

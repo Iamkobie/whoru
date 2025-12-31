@@ -42,10 +42,165 @@ const userSchema = new mongoose.Schema({
   friends: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
+  }],
+  
+  // ========== PROFILE SETUP FIELDS ==========
+  profileCompleted: {
+    type: Boolean,
+    default: false
+  },
+  
+  profileSetupStep: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 5
+  },
+  
+  // BASIC INFO (Step 1)
+  profilePicture: {
+    type: String,
+    default: null
+  },
+  
+  bio: {
+    type: String,
+    minlength: 50,
+    maxlength: 300,
+    default: null
+  },
+  
+  yearLevel: {
+    type: String,
+    enum: ['1st Year', '2nd Year', '3rd Year', '4th Year', 'Graduate', null],
+    default: null
+  },
+  
+  major: {
+    type: String,
+    default: null
+  },
+  
+  // IDENTITY CARD DESIGN (Step 2)
+  identityCard: {
+    backgroundPattern: {
+      type: String,
+      enum: ['gradient1', 'gradient2', 'gradient3', 'pattern1', 'pattern2', 'mesh1', 'mesh2', 'aurora', 'sunset', 'ocean'],
+      default: 'gradient1'
+    },
+    accentColor: {
+      type: String,
+      default: '#8B5CF6'
+    },
+    fontStyle: {
+      type: String,
+      enum: ['modern', 'classic', 'playful'],
+      default: 'modern'
+    },
+    layout: {
+      type: String,
+      enum: ['minimal', 'detailed', 'creative'],
+      default: 'minimal'
+    }
+  },
+  
+  // INTERESTS & VIBE (Step 3)
+  interests: [{
+    type: String,
+    trim: true
+  }],
+  
+  vibeTags: [{
+    type: String,
+    trim: true
+  }],
+  
+  funFact: {
+    type: String,
+    maxlength: 100,
+    default: null
+  },
+  
+  // MATCHMAKING PREFERENCES (Step 4)
+  matchPreferences: {
+    sameYearLevel: { type: Boolean, default: false },
+    sameMajor: { type: Boolean, default: false },
+    similarInterests: { type: Boolean, default: true },
+    anyone: { type: Boolean, default: true },
+    chatStyle: {
+      type: String,
+      enum: ['deep', 'casual', 'friends', 'study', null],
+      default: null
+    }
+  },
+  
+  // PRIVACY SETTINGS (Step 5)
+  privacySettings: {
+    showYearLevel: { type: Boolean, default: true },
+    showMajor: { type: Boolean, default: true },
+    allowMatchmaking: { type: Boolean, default: true },
+    showOnlineStatus: { type: Boolean, default: true },
+    showProfileViews: { type: Boolean, default: true }
+  },
+  
+  // ========== FEATURED PHOTOS (NEW) ==========
+  featuredPhotos: [{
+    url: {
+      type: String,
+      required: true
+    },
+    publicId: {
+      type: String,
+      required: true
+    },
+    caption: {
+      type: String,
+      maxlength: 100,
+      default: ''
+    },
+    uploadedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  
+  // ========== PROFILE VIEWS (NEW - ANONYMOUS) ==========
+  profileViews: [{
+    viewerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    viewedAt: {
+      type: Date,
+      default: Date.now
+    }
+    // NO OTHER IDENTIFYING INFO - keeps it anonymous
+  }],
+  
+  // ========== PROFILE REACTIONS (NEW) ==========
+  profileReactions: [{
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    reaction: {
+      type: String,
+      enum: ['like', 'love', 'cool', 'fire', 'star'],
+      required: true
+    },
+    reactedAt: {
+      type: Date,
+      default: Date.now
+    }
   }]
 }, {
   timestamps: true // Adds createdAt and updatedAt
 });
+
+// Index for faster profile view queries
+userSchema.index({ 'profileViews.viewedAt': -1 });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {

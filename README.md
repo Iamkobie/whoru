@@ -219,7 +219,7 @@ MIT License - feel free to use this project for learning or personal use!
 
 ## 👨‍💻 Author
 
-Built with ❤️ by GitHub Copilot
+Kobie Rabe Calingasa
 
 ---
 

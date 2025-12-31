@@ -4,6 +4,7 @@ const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const FriendRequest = require('../models/FriendRequest');
 const authMiddleware = require('../middleware/authMiddleware');
+const { createNotification } = require('../utils/notificationHelper');
 
 /**
  * @route   GET /api/friends/search
@@ -30,7 +31,7 @@ router.get('/search', authMiddleware, async (req, res) => {
       },
       isVerified: true
     })
-    .select('username email createdAt')
+    .select('username email profilePicture bio major yearLevel createdAt')
     .limit(20);
 
     res.json({ 
@@ -106,6 +107,17 @@ router.post('/request', [
     });
 
     await friendRequest.save();
+    
+    // Create notification for friend request
+    const sender = await User.findById(req.user._id).select('username');
+    await createNotification({
+      recipient: receiverId,
+      sender: req.user._id,
+      type: 'friend_request',
+      message: `${sender.username} sent you a friend request`,
+      link: `/friends`,
+      metadata: { requestId: friendRequest._id.toString() }
+    }, req.app.get('io'));
 
     res.status(201).json({ 
       success: true, 
@@ -132,7 +144,7 @@ router.get('/requests', authMiddleware, async (req, res) => {
       receiver: req.user._id,
       status: 'pending'
     })
-    .populate('sender', 'username email createdAt')
+    .populate('sender', 'username email profilePicture createdAt')
     .sort({ createdAt: -1 });
 
     res.json({ 
@@ -193,6 +205,17 @@ router.put('/request/:id/accept', authMiddleware, async (req, res) => {
     await User.findByIdAndUpdate(friendRequest.sender, {
       $addToSet: { friends: req.user._id }
     });
+    
+    // Create notification for accepted friend request
+    const accepter = await User.findById(req.user._id).select('username');
+    await createNotification({
+      recipient: friendRequest.sender,
+      sender: req.user._id,
+      type: 'friend_accept',
+      message: `${accepter.username} accepted your friend request`,
+      link: `/profile/${req.user._id}`,
+      metadata: { requestId: friendRequest._id.toString() }
+    }, req.app.get('io'));
 
     res.json({ 
       success: true, 
@@ -267,7 +290,7 @@ router.put('/request/:id/decline', authMiddleware, async (req, res) => {
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
-      .populate('friends', 'username email createdAt');
+      .populate('friends', 'username email profilePicture createdAt');
 
     res.json({ 
       success: true, 

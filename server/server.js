@@ -10,6 +10,11 @@ const initializeSocketHandlers = require('./socket/chatHandler');
 const authRoutes = require('./routes/auth');
 const friendsRoutes = require('./routes/friends');
 const chatRoutes = require('./routes/chat');
+const profileRoutes = require('./routes/profile');
+const notificationRoutes = require('./routes/notifications');
+const groupRoutes = require('./routes/groups');
+const storyRoutes = require('./routes/stories');
+const activityRoutes = require('./routes/activities');
 
 // Initialize Express app
 const app = express();
@@ -27,6 +32,7 @@ const io = new Server(server, {
 // Connect to MongoDB
 connectDB();
 
+// Trigger restart
 // Middleware
 app.use(cors({
   origin: ['http://localhost:3000', 'http://localhost:3001'],
@@ -54,6 +60,12 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/friends', friendsRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/profile', profileRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/groups', groupRoutes);
+app.use('/api/stories', storyRoutes);
+app.use('/api/activities', activityRoutes);
+app.use('/api/group-messages', require('./routes/groupMessages'));
 
 // 404 Handler
 app.use((req, res) => {
@@ -72,6 +84,9 @@ app.use((err, req, res, next) => {
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
+
+// Make Socket.io accessible to routes
+app.set('io', io);
 
 // Initialize Socket.io handlers
 initializeSocketHandlers(io);
