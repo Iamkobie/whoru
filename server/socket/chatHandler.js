@@ -257,38 +257,72 @@ const initializeSocketHandlers = (io) => {
           return;
         }
 
-        const isMember = group.members.some(m => m.user._id.toString() === senderId);
-        if (!isMember) {
+        const memberData = group.members.find(m => m.user._id.toString() === senderId);
+        if (!memberData) {
           socket.emit('error', { message: 'Not a member of this group' });
           return;
         }
 
-        // Save message
+        // PHASE 3: Check if user is muted
+        const mutedMember = group.mutedMembers.find(m => m.user.toString() === senderId);
+        if (mutedMember) {
+          // Check if mute has expired
+          if (mutedMember.mutedUntil && new Date() > mutedMember.mutedUntil) {
+            // Remove expired mute
+            group.mutedMembers = group.mutedMembers.filter(m => m.user.toString() !== senderId);
+            await group.save();
+          } else {
+            // User is still muted
+            const timeRemaining = mutedMember.mutedUntil 
+              ? Math.ceil((mutedMember.mutedUntil - new Date()) / 60000) 
+              : 'indefinitely';
+            socket.emit('error', { 
+              message: `You are muted in this group${timeRemaining !== 'indefinitely' ? ` for ${timeRemaining} more minutes` : ''}` 
+            });
+            return;
+          }
+        }
+
+        // Save message - handle both string and object content
+        const messageContent = typeof content === 'string' 
+          ? { text: content.trim(), type: messageType }
+          : content;
+
         const message = new GroupMessage({
           group: groupId,
           sender: senderId,
           messageType,
-          content: content.trim()
+          content: messageContent
         });
 
         await message.save();
         await message.populate('sender', '_id username profilePicture');
 
+        // Add sender role to the populated message
+        const messageWithRole = {
+          ...message.toObject(),
+          sender: {
+            ...message.sender.toObject(),
+            role: memberData.role
+          }
+        };
+
         // Update group last activity
         group.lastActivity = new Date();
         await group.save();
 
-        // Emit to all group members
+        // Emit to all group members (including sender for multi-device sync)
         io.to(`group:${groupId}`).emit('receive_group_message', {
-          message,
+          message: messageWithRole,
           groupId,
           tempId
         });
 
-        // Send confirmation to sender
+        // Send ACK confirmation to sender with tempId for matching
         socket.emit('group_message_sent', {
-          message,
-          tempId
+          message: messageWithRole,
+          tempId,
+          success: true
         });
 
         console.log(`📨 Group message in ${groupId} from ${senderId}`);

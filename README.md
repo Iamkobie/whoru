@@ -219,8 +219,7 @@ MIT License - feel free to use this project for learning or personal use!
 
 ## 👨‍💻 Author
 
-IamKobie
-
+Iamkobie
 ---
 
 **Note**: This is a learning project. For production use, implement additional security measures, proper error handling, rate limiting, and comprehensive testing.

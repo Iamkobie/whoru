@@ -131,7 +131,7 @@ router.get('/', auth, async (req, res) => {
 
 /**
  * @route   GET /api/groups/discover
- * @desc    Discover public groups (UNIQUE: Activity-based matching)
+ * @desc    Discover PUBLIC groups only (exclude private groups)
  * @access  Private
  */
 router.get('/discover', auth, async (req, res) => {
@@ -139,9 +139,10 @@ router.get('/discover', auth, async (req, res) => {
     const userId = req.user.id;
     const { activity, search } = req.query;
 
+    // PHASE 2 REQUIREMENT: Only PUBLIC groups, exclude groups user is already member of
     let query = {
-      'settings.isPublic': true,
-      'members.user': { $ne: userId }
+      'settings.isPublic': true, // MUST be public
+      'members.user': { $ne: userId } // User is NOT a member
     };
 
     if (activity) {
@@ -161,9 +162,10 @@ router.get('/discover', auth, async (req, res) => {
       .sort({ memberCount: -1, lastActivity: -1 })
       .limit(20);
 
+    console.log(`✅ Discover: Found ${groups.length} public groups for user ${userId}`);
     res.json(groups);
   } catch (error) {
-    console.error('Discover groups error:', error);
+    console.error('❌ Discover groups error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -216,6 +218,11 @@ router.post('/:groupId/join', auth, async (req, res) => {
       return res.status(400).json({ message: 'Already a member' });
     }
 
+    // Check if banned
+    if (group.bannedMembers && group.bannedMembers.some(banned => banned.user.toString() === userId)) {
+      return res.status(403).json({ message: 'You are banned from this group' });
+    }
+
     // Check if already requested
     const existingRequest = group.joinRequests?.find(r => r.user.toString() === userId);
     if (existingRequest) {
@@ -227,8 +234,21 @@ router.post('/:groupId/join', auth, async (req, res) => {
       return res.status(400).json({ message: 'Group is full' });
     }
 
-    // For private groups, send join request
+    // For private groups or groups requiring approval, send join request
+    // PHASE 2: Private groups can ONLY be joined via invitation
     if (group.privacy === 'private' || group.settings.requireApproval) {
+      // Check if user has a pending invitation
+      const hasInvitation = group.invitations && group.invitations.some(
+        inv => inv.user.toString() === userId
+      );
+      
+      // If no invitation exists for private group, reject
+      if (group.privacy === 'private' && !hasInvitation) {
+        return res.status(403).json({ 
+          message: 'This is a private group. You can only join via invitation.' 
+        });
+      }
+      
       group.joinRequests = group.joinRequests || [];
       group.joinRequests.push({
         user: userId,
@@ -247,8 +267,8 @@ router.post('/:groupId/join', auth, async (req, res) => {
           sender: userId,
           type: 'group_join_request',
           message: `${joiningUser.username} wants to join ${group.name}`,
-          link: `/groups/${groupId}/requests`,
-          metadata: { groupId: groupId.toString() }
+          link: `/group-chat/${groupId}`,
+          metadata: { groupId: groupId.toString(), userId: userId }
         }, req.app.get('io'));
       }
 
@@ -275,7 +295,8 @@ router.post('/:groupId/join', auth, async (req, res) => {
         sender: userId,
         type: 'group_join',
         message: `${joiningUser.username} joined ${group.name}`,
-        link: `/groups/${groupId}`
+        link: `/group-chat/${groupId}`,
+        metadata: { groupId: groupId.toString(), userId: userId }
       }, req.app.get('io'));
     }
 
@@ -943,6 +964,560 @@ router.post('/:groupId/demote', auth, async (req, res) => {
     res.json({ message: 'Member demoted successfully' });
   } catch (error) {
     console.error('Demote member error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/invite
+ * @desc    Invite a user to join group
+ * @access  Private
+ */
+router.post('/:groupId/invite', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId, message } = req.body;
+    const inviterId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Check if inviter is a member
+    if (!group.isMember(inviterId)) {
+      return res.status(403).json({ message: 'You must be a member to invite others' });
+    }
+
+    // Check if member invites are allowed or if user is admin
+    if (!group.settings.allowMemberInvites && !group.isAdmin(inviterId)) {
+      return res.status(403).json({ message: 'Only admins can invite members' });
+    }
+
+    // Check if user is already a member
+    if (group.isMember(userId)) {
+      return res.status(400).json({ message: 'User is already a member' });
+    }
+
+    // Check if user is already invited
+    if (group.invitations.some(inv => inv.user.toString() === userId)) {
+      return res.status(400).json({ message: 'User is already invited' });
+    }
+
+    // Check if user is banned
+    if (group.bannedMembers.some(banned => banned.user.toString() === userId)) {
+      return res.status(403).json({ message: 'User is banned from this group' });
+    }
+
+    // Check max members
+    if (group.members.length >= group.settings.maxMembers) {
+      return res.status(400).json({ message: 'Group is full' });
+    }
+
+    // Add invitation
+    group.invitations.push({
+      user: userId,
+      invitedBy: inviterId,
+      message: message || ''
+    });
+
+    await group.save();
+
+    // Create notification with proper structure
+    await createNotification({
+      recipient: userId,
+      sender: inviterId,
+      type: 'group_invitation',
+      message: `You've been invited to join ${group.name}`,
+      link: `/group-chat/${group._id}`,
+      metadata: { groupId: group._id.toString(), groupName: group.name }
+    }, req.app.get('io'));
+
+    res.json({ message: 'Invitation sent successfully', group });
+  } catch (error) {
+    console.error('❌ Invite user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/invitation/accept
+ * @desc    Accept a group invitation
+ * @access  Private
+ */
+router.post('/:groupId/invitation/accept', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const userId = req.user.id;
+
+    const group = await Group.findById(groupId).populate('members.user', 'username profilePicture');
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Find invitation
+    const invitationIndex = group.invitations.findIndex(inv => inv.user.toString() === userId);
+    if (invitationIndex === -1) {
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+
+    // Check if already a member
+    if (group.isMember(userId)) {
+      return res.status(400).json({ message: 'You are already a member' });
+    }
+
+    // Check max members
+    if (group.members.length >= group.settings.maxMembers) {
+      return res.status(400).json({ message: 'Group is full' });
+    }
+
+    // Add user as member
+    group.members.push({
+      user: userId,
+      role: 'member'
+    });
+
+    // Remove invitation
+    group.invitations.splice(invitationIndex, 1);
+
+    await group.save();
+
+    // Notify the inviter
+    const invitation = group.invitations[invitationIndex];
+    if (invitation && invitation.invitedBy) {
+      await createNotification(
+        invitation.invitedBy,
+        userId,
+        'group_joined',
+        `${req.user.username} accepted your invitation to ${group.name}`,
+        { groupId: group._id }
+      );
+    }
+
+    res.json({ message: 'Joined group successfully', group });
+  } catch (error) {
+    console.error('Accept invitation error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/invitation/decline
+ * @desc    Decline a group invitation
+ * @access  Private
+ */
+router.post('/:groupId/invitation/decline', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const userId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Find and remove invitation
+    const invitationIndex = group.invitations.findIndex(inv => inv.user.toString() === userId);
+    if (invitationIndex === -1) {
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+
+    group.invitations.splice(invitationIndex, 1);
+    await group.save();
+
+    res.json({ message: 'Invitation declined' });
+  } catch (error) {
+    console.error('Decline invitation error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   GET /api/groups/my-invitations
+ * @desc    Get all group invitations for current user
+ * @access  Private
+ */
+router.get('/my-invitations', auth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const groups = await Group.find({ 'invitations.user': userId })
+      .populate('creator', 'username profilePicture')
+      .populate('invitations.invitedBy', 'username profilePicture')
+      .select('name description groupPicture privacy invitations members');
+
+    // Filter to only return the user's invitation
+    const invitations = groups.map(group => ({
+      group: {
+        _id: group._id,
+        name: group.name,
+        description: group.description,
+        groupPicture: group.groupPicture,
+        privacy: group.privacy,
+        memberCount: group.members.length
+      },
+      invitation: group.invitations.find(inv => inv.user.toString() === userId)
+    }));
+
+    res.json({ invitations });
+  } catch (error) {
+    console.error('Get invitations error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/ban
+ * @desc    Ban a member from the group
+ * @access  Private (Admin/Moderator with proper permissions)
+ */
+router.post('/:groupId/ban', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId, reason } = req.body;
+    const adminId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // PHASE 3: Use permission method to check if admin can ban this user
+    if (!group.canBanUser(adminId, userId)) {
+      const adminRole = group.getUserRole(adminId);
+      const targetRole = group.getUserRole(userId);
+      return res.status(403).json({ 
+        message: `${adminRole}s cannot ban ${targetRole}s. Only creator can ban admins, admins can ban moderators/members, moderators can ban members.` 
+      });
+    }
+
+    // Check if already banned
+    if (group.bannedMembers.some(banned => banned.user.toString() === userId)) {
+      return res.status(400).json({ message: 'User is already banned' });
+    }
+
+    // Remove from members if present
+    group.members = group.members.filter(m => m.user.toString() !== userId);
+
+    // Add to banned list
+    group.bannedMembers.push({
+      user: userId,
+      bannedBy: adminId,
+      reason: reason || 'No reason provided'
+    });
+
+    await group.save();
+
+    // Notify banned user with proper structure
+    await createNotification({
+      recipient: userId,
+      sender: adminId,
+      type: 'group_banned',
+      message: `You have been banned from ${group.name}`,
+      link: null,
+      metadata: { groupId: group._id.toString(), reason: reason || 'No reason provided' }
+    }, req.app.get('io'));
+
+    console.log(`✅ User ${userId} banned from group ${groupId} by ${adminId}`);
+    res.json({ message: 'User banned successfully', group });
+  } catch (error) {
+    console.error('❌ Ban user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/unban
+ * @desc    Unban a member from the group
+ * @access  Private (Admin only)
+ */
+router.post('/:groupId/unban', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId } = req.body;
+    const adminId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Only admins can unban
+    if (!group.isAdmin(adminId)) {
+      return res.status(403).json({ message: 'Only admins can unban members' });
+    }
+
+    // Remove from banned list
+    const bannedIndex = group.bannedMembers.findIndex(banned => banned.user.toString() === userId);
+    if (bannedIndex === -1) {
+      return res.status(404).json({ message: 'User is not banned' });
+    }
+
+    group.bannedMembers.splice(bannedIndex, 1);
+    await group.save();
+
+    // Notify unbanned user
+    await createNotification(
+      userId,
+      adminId,
+      'group_unbanned',
+      `You have been unbanned from ${group.name}`,
+      { groupId: group._id }
+    );
+
+    res.json({ message: 'User unbanned successfully', group });
+  } catch (error) {
+    console.error('Unban user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/mute
+ * @desc    Mute a member in the group
+ * @access  Private (Moderator/Admin with proper permissions)
+ */
+router.post('/:groupId/mute', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId, duration, reason } = req.body; // duration in minutes
+    const modId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // PHASE 3: Use permission method - moderators and above can mute members
+    if (!group.isModerator(modId)) {
+      return res.status(403).json({ message: 'Only moderators and above can mute members' });
+    }
+
+    // Use canBanUser method for mute permission check (same hierarchy)
+    if (!group.canBanUser(modId, userId)) {
+      const modRole = group.getUserRole(modId);
+      const targetRole = group.getUserRole(userId);
+      return res.status(403).json({ 
+        message: `${modRole}s cannot mute ${targetRole}s. Check permission hierarchy.` 
+      });
+    }
+
+    // Check if already muted
+    const existingMute = group.mutedMembers.find(muted => muted.user.toString() === userId);
+    if (existingMute) {
+      // Update existing mute
+      existingMute.mutedBy = modId;
+      existingMute.mutedAt = new Date();
+      existingMute.mutedUntil = duration ? new Date(Date.now() + duration * 60 * 1000) : null;
+      existingMute.reason = reason || 'No reason provided';
+    } else {
+      // Add new mute
+      group.mutedMembers.push({
+        user: userId,
+        mutedBy: modId,
+        mutedUntil: duration ? new Date(Date.now() + duration * 60 * 1000) : null,
+        reason: reason || 'No reason provided'
+      });
+    }
+
+    await group.save();
+
+    // Notify muted user with proper structure
+    await createNotification({
+      recipient: userId,
+      sender: modId,
+      type: 'group_muted',
+      message: `You have been muted in ${group.name}${duration ? ` for ${duration} minutes` : ''}`,
+      link: null,
+      metadata: { 
+        groupId: group._id.toString(), 
+        duration: duration || null,
+        reason: reason || 'No reason provided'
+      }
+    }, req.app.get('io'));
+
+    console.log(`✅ User ${userId} muted in group ${groupId} by ${modId}`);
+    res.json({ message: 'User muted successfully', group });
+  } catch (error) {
+    console.error('❌ Mute user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/unmute
+ * @desc    Unmute a member in the group
+ * @access  Private (Moderator/Admin only)
+ */
+router.post('/:groupId/unmute', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId } = req.body;
+    const modId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Check if user has permission
+    const modMember = group.members.find(m => m.user.toString() === modId);
+    if (!modMember || !['creator', 'admin', 'moderator'].includes(modMember.role)) {
+      return res.status(403).json({ message: 'Only moderators can unmute members' });
+    }
+
+    // Remove from muted list
+    const mutedIndex = group.mutedMembers.findIndex(muted => muted.user.toString() === userId);
+    if (mutedIndex === -1) {
+      return res.status(404).json({ message: 'User is not muted' });
+    }
+
+    group.mutedMembers.splice(mutedIndex, 1);
+    await group.save();
+
+    // Notify unmuted user
+    await createNotification(
+      userId,
+      modId,
+      'group_unmuted',
+      `You have been unmuted in ${group.name}`,
+      { groupId: group._id }
+    );
+
+    res.json({ message: 'User unmuted successfully', group });
+  } catch (error) {
+    console.error('Unmute user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/rules
+ * @desc    Add a rule to the group
+ * @access  Private (Admin only)
+ */
+router.post('/:groupId/rules', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { text } = req.body;
+    const adminId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Only admins can add rules
+    if (!group.isAdmin(adminId)) {
+      return res.status(403).json({ message: 'Only admins can add rules' });
+    }
+
+    group.rules.push({
+      text,
+      createdBy: adminId
+    });
+
+    await group.save();
+
+    res.json({ message: 'Rule added successfully', group });
+  } catch (error) {
+    console.error('Add rule error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   DELETE /api/groups/:groupId/rules/:ruleId
+ * @desc    Delete a rule from the group
+ * @access  Private (Admin only)
+ */
+router.delete('/:groupId/rules/:ruleId', auth, async (req, res) => {
+  try {
+    const { groupId, ruleId } = req.params;
+    const adminId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Only admins can delete rules
+    if (!group.isAdmin(adminId)) {
+      return res.status(403).json({ message: 'Only admins can delete rules' });
+    }
+
+    group.rules = group.rules.filter(rule => rule._id.toString() !== ruleId);
+    await group.save();
+
+    res.json({ message: 'Rule deleted successfully', group });
+  } catch (error) {
+    console.error('Delete rule error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   POST /api/groups/:groupId/announcements
+ * @desc    Create an announcement
+ * @access  Private (Admin only)
+ */
+router.post('/:groupId/announcements', auth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { text, isPinned } = req.body;
+    const adminId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Only admins can create announcements
+    if (!group.isAdmin(adminId)) {
+      return res.status(403).json({ message: 'Only admins can create announcements' });
+    }
+
+    group.announcements.push({
+      text,
+      createdBy: adminId,
+      isPinned: isPinned !== undefined ? isPinned : true
+    });
+
+    await group.save();
+
+    res.json({ message: 'Announcement created successfully', group });
+  } catch (error) {
+    console.error('Create announcement error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @route   DELETE /api/groups/:groupId/announcements/:announcementId
+ * @desc    Delete an announcement
+ * @access  Private (Admin only)
+ */
+router.delete('/:groupId/announcements/:announcementId', auth, async (req, res) => {
+  try {
+    const { groupId, announcementId } = req.params;
+    const adminId = req.user.id;
+
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Only admins can delete announcements
+    if (!group.isAdmin(adminId)) {
+      return res.status(403).json({ message: 'Only admins can delete announcements' });
+    }
+
+    group.announcements = group.announcements.filter(announcement => announcement._id.toString() !== announcementId);
+    await group.save();
+
+    res.json({ message: 'Announcement deleted successfully', group });
+  } catch (error) {
+    console.error('Delete announcement error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
